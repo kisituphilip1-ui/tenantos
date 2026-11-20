@@ -8,8 +8,8 @@ The security/data model and permission plan are in [docs/architecture.md](./docs
 
 - Email/password sign-in, invitation acceptance, generic password-reset responses, password update, global sign-out, and TOTP MFA enrollment/challenge for owners and administrators.
 - Organization-scoped dashboard and record views for properties, tenancies, payments, maintenance, private documents, notices, approvals, team, and audit history.
-- Maintenance request submission, employee invitation requests, second-approver review, and a trusted invitation Edge Function.
-- Read-only demo mode with fictional sample records and role previews; available from the setup screen without Supabase credentials. Demo actions never authenticate, upload, or write data.
+- Owner-controlled member invitations that default to customer/tenant access, owner-only administrator assignment, second-approver review when configured, and a trusted invitation Edge Function.
+- Interactive demo mode with fictional sample records and role previews; available from the setup or sign-in screen without Supabase credentials. Demo edits persist only in each visitor's browser and never reach Supabase; demo payments, documents, and invitations are simulated only.
 - Versioned schema with constraints, indexes, update/audit triggers, RLS on every application table, role/property/tenancy policies, a private document bucket, and pgTAP isolation tests.
 - UGX money columns use exact PostgreSQL `numeric(14,2)`. Payment status is not confirmable from the browser.
 
@@ -40,7 +40,7 @@ This is a starter, not a fully configured production service. Provider payment c
 
    In the Supabase dashboard, copy the **Project URL** from **Project Settings → API** (or the project’s Connect panel). Copy the **publishable key** from **Project Settings → API Keys**. For older projects, Supabase may label this the `anon` key. The publishable/anon key is intended for client use only when RLS is correctly enabled. `.env` is ignored by Git; never prefix a service-role or secret key with `VITE_`.
 
-   If you only want to explore the interface, select **Explore demo** on the setup screen. It uses fictional, read-only data and does not require credentials.
+   If you want to explore the interface, select **Explore demo** on the setup or sign-in screen. It uses fictional data and does not require credentials; edits are local to the visitor's browser and normal authentication remains enabled for live data.
 
 4. Start Vite after setting real values:
 
@@ -53,7 +53,7 @@ This is a starter, not a fully configured production service. Provider payment c
 ## Connect Supabase
 
 1. Create separate Supabase projects for development, test, and production. Keep production credentials and data out of development.
-2. In **Authentication → URL Configuration**, set the local Site URL to `http://localhost:5173` and add the exact local and production redirect URLs. Invitation and password-recovery links use the app origin.
+2. In **Authentication → URL Configuration**, set the production Site URL to `https://haven-uganda-tenant-management.vercel.app` and allow that origin plus `http://localhost:5173` for redirects. These settings are kept in `supabase/config.toml`; update and push them if the production URL changes. Invitation and password-recovery links use the app origin.
 3. In **Authentication → Providers**, enable email/password and email delivery. Require email confirmation, configure strong password rules and SMTP for production, and disable open sign-ups if only invitations are appropriate. If phone verification is needed, configure a trusted SMS provider and enable phone authentication. Supabase Auth rate limits and abuse/CAPTCHA controls should be configured before launch.
 4. Install or run the Supabase CLI, authenticate, link the project, and apply the migration:
 

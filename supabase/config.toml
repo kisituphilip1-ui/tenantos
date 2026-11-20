@@ -1,5 +1,12 @@
 project_id = "haven-uganda"
 
+[auth]
+site_url = "https://haven-uganda-tenant-management.vercel.app"
+additional_redirect_urls = [
+  "https://haven-uganda-tenant-management.vercel.app/**",
+  "http://localhost:5173/**",
+]
+
 [db.seed]
 enabled = false
 

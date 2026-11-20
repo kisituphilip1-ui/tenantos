@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import type { Session, User } from "@supabase/supabase-js";
 import {
@@ -28,7 +28,7 @@ import {
 } from "lucide-react";
 import { supabase } from "./lib/supabase";
 
-const DemoWorkspace = lazy(() => import("./Demo").then(({ DemoWorkspace: workspace }) => ({ default: workspace })));
+
 
 type Role = "owner" | "administrator" | "property_manager" | "employee" | "tenant";
 type Page =
@@ -61,7 +61,7 @@ const roleLabels: Record<Role, string> = {
   administrator: "Administrator",
   property_manager: "Property manager",
   employee: "Employee",
-  tenant: "Tenant",
+  tenant: "Customer / Tenant",
 };
 
 const navigation: { name: Page; icon: typeof Home; group: "Workspace" | "Management" }[] = [
@@ -145,6 +145,17 @@ function safeErrorMessage() {
   return "We couldn't complete that request. Check the details and your access, then try again.";
 }
 
+function passwordRecoveryErrorMessage(error: unknown) {
+  const detail = error instanceof Error ? error.message.toLowerCase() : "";
+  if (/expired|invalid|session.*missing|flow_state|code verifier|otp.*expired/.test(detail)) {
+    return "This reset link is expired or unavailable in this browser. Request a fresh link and open it in the same browser.";
+  }
+  if (/weak_password|password.{0,40}(weak|minimum|length|characters)/.test(detail)) {
+    return "Choose a stronger password with at least 10 characters.";
+  }
+  return "We couldn't update your password. Request a fresh reset email and open the newest link in the same browser.";
+}
+
 function objectValue(value: unknown): Record<string, unknown> {
   if (typeof value === "string") {
     try {
@@ -163,9 +174,7 @@ export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [ready, setReady] = useState(false);
   const [authMessage, setAuthMessage] = useState("");
-  const [demoMode, setDemoMode] = useState(
-    new URLSearchParams(window.location.search).get("demo") === "1",
-  );
+  const [demoMode] = useState(false);
   const [passwordRecovery, setPasswordRecovery] = useState(
     new URLSearchParams(window.location.search).get("view") === "reset",
   );
@@ -176,12 +185,18 @@ export default function App() {
       return;
     }
 
-    void supabase.auth.getSession().then(({ data, error }) => {
-      if (error) setAuthMessage("We couldn't restore your session. Please sign in again.");
-      setSession(data.session);
-      setUser(data.session?.user ?? null);
-      setReady(true);
-    });
+    void supabase.auth.getSession()
+      .then(({ data, error }) => {
+        if (error) throw error;
+        setSession(data.session);
+        setUser(data.session?.user ?? null);
+      })
+      .catch(() => {
+        setSession(null);
+        setUser(null);
+        setAuthMessage("We couldn't verify your session. Check your connection and try signing in again.");
+      })
+      .finally(() => setReady(true));
 
     const { data: listener } = supabase.auth.onAuthStateChange((event, nextSession) => {
       if (event === "PASSWORD_RECOVERY") setPasswordRecovery(true);
@@ -191,6 +206,13 @@ export default function App() {
 
     return () => listener.subscription.unsubscribe();
   }, []);
+
+  const startDemo = () => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("demo", "1");
+    window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    setDemoMode(true);
+  };
 
   if (!ready) {
     return <div className="loading-screen" role="status">Loading your secure workspace…</div>;
@@ -210,16 +232,17 @@ export default function App() {
   }
 
   if (!supabase) {
-    return <ConfigurationScreen onStartDemo={() => {
-      const url = new URL(window.location.href);
-      url.searchParams.set("demo", "1");
-      window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
-      setDemoMode(true);
-    }} />;
+    return <ConfigurationScreen onStartDemo={startDemo} />;
   }
 
   if ((!user || !session) || passwordRecovery) {
-    return <AuthScreen message={authMessage} onMessage={setAuthMessage} onPasswordChanged={() => setPasswordRecovery(false)} />;
+    return <AuthScreen
+      message={authMessage}
+      onMessage={setAuthMessage}
+      onStartDemo={startDemo}
+      onPasswordChanged={() => setPasswordRecovery(false)}
+      isPasswordRecovery={passwordRecovery}
+    />;
   }
 
   return (
@@ -253,18 +276,34 @@ function ConfigurationScreen({ onStartDemo }: { onStartDemo: () => void }) {
   );
 }
 
-function AuthScreen({ message, onMessage, onPasswordChanged }: { message: string; onMessage: (value: string) => void; onPasswordChanged: () => void }) {
+function AuthScreen({ message, onMessage, onStartDemo, onPasswordChanged, isPasswordRecovery }: {
+  message: string;
+  onMessage: (value: string) => void;
+  onStartDemo: () => void;
+  onPasswordChanged: () => void;
+  isPasswordRecovery: boolean;
+}) {
   const [mode, setMode] = useState<"signin" | "forgot" | "password">(
-    new URLSearchParams(window.location.search).get("view") === "reset" ? "password" : "signin",
+    isPasswordRecovery || new URLSearchParams(window.location.search).get("view") === "reset" ? "password" : "signin",
   );
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [pending, setPending] = useState(false);
   const [notice, setNotice] = useState("");
+
+  useEffect(() => {
+    if (isPasswordRecovery) setMode("password");
+  }, [isPasswordRecovery]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!supabase) return;
+    if (mode === "password" && password !== confirmPassword) {
+      onMessage("The passwords don't match.");
+      return;
+    }
+
     setPending(true);
     setNotice("");
     onMessage("");
@@ -272,6 +311,7 @@ function AuthScreen({ message, onMessage, onPasswordChanged }: { message: string
       if (mode === "signin") {
         const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
         if (error) throw error;
+        onPasswordChanged();
       } else if (mode === "forgot") {
         const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
           redirectTo: `${window.location.origin}/?view=reset`,
@@ -286,13 +326,16 @@ function AuthScreen({ message, onMessage, onPasswordChanged }: { message: string
         onPasswordChanged();
         setMode("signin");
         setPassword("");
+        setConfirmPassword("");
       }
-    } catch {
-      onMessage(
-        mode === "signin"
-          ? "Unable to sign in. Check your details or ask your administrator for an invitation."
-          : safeErrorMessage(),
-      );
+    } catch (error) {
+      if (mode === "signin") {
+        onMessage("Unable to sign in. Check your details or ask your administrator for an invitation.");
+      } else if (mode === "forgot") {
+        onMessage("We couldn't send reset instructions. Check your connection, wait a few minutes, and try again.");
+      } else {
+        onMessage(passwordRecoveryErrorMessage(error));
+      }
     } finally {
       setPending(false);
     }
@@ -353,6 +396,21 @@ function AuthScreen({ message, onMessage, onPasswordChanged }: { message: string
                 />
               </label>
             )}
+            {mode === "password" && (
+              <label className="field-label">
+                {mode === "password" ? "Confirm new password" : "Confirm password"}
+                <input
+                  type="password"
+                  name="confirm-password"
+                  autoComplete="new-password"
+                  minLength={10}
+                  required
+                  value={confirmPassword}
+                  onChange={(event) => setConfirmPassword(event.target.value)}
+                  placeholder="Re-enter your password"
+                />
+              </label>
+            )}
             {message && <p className="form-error" role="alert">{message}</p>}
             <button type="submit" className="primary-button wide" disabled={pending}>
               {pending ? "Please wait…" : mode === "signin" ? "Sign in securely" : mode === "forgot" ? "Send reset instructions" : "Update password"}
@@ -360,8 +418,27 @@ function AuthScreen({ message, onMessage, onPasswordChanged }: { message: string
             </button>
           </form>
           <div className="auth-links">
-            {mode === "signin" && <button type="button" className="text-button" onClick={() => { setMode("forgot"); onMessage(""); }}>Forgot password?</button>}
-            {mode !== "signin" && mode !== "password" && <button type="button" className="text-button" onClick={() => { setMode("signin"); onMessage(""); }}>Back to sign in</button>}
+            {mode === "signin" && (
+              <>
+                <button type="button" className="text-button" onClick={() => { setMode("forgot"); onMessage(""); setNotice(""); }}>Forgot password?</button>
+                
+              </>
+            )}
+            {mode !== "signin" && (
+              <button
+                type="button"
+                className="text-button"
+                onClick={() => {
+                  setMode("signin");
+                  setPassword("");
+                  setConfirmPassword("");
+                  onMessage("");
+                  setNotice("");
+                }}
+              >
+                Back to sign in
+              </button>
+            )}
           </div>
           <div className="auth-footer"><ShieldCheck size={15} />Protected access · Invitation or administrator approval required</div>
         </div>
@@ -475,6 +552,7 @@ function Workspace({
       if (item.name === "Audit") return isPrivileged;
       if (item.name === "Team") return isPrivileged || role === "property_manager";
       if (item.name === "Approvals") return role !== "tenant" && role !== "employee";
+      if (item.name === "Properties" && role === "tenant") return false;
       if (item.name === "Tenancies" && role === "tenant") return false;
       return true;
     }),
@@ -1331,7 +1409,7 @@ function InvitationComposer({ organization, user, role, setError }: { organizati
     setPending(false);
   }
 
-  const canInvite = isAdminRole(role) || role === "property_manager";
+  const canInvite = role === "owner";
 
   return (
     <div className="team-workflow">
@@ -1339,14 +1417,14 @@ function InvitationComposer({ organization, user, role, setError }: { organizati
         <div className="card-heading"><div><p className="eyebrow">INVITE WITH LEAST PRIVILEGE</p><h2>Invite a teammate</h2></div><span className="composer-icon"><Users size={19} /></span></div>
         {canInvite ? <form className="inline-form two-column" onSubmit={(event) => void submit(event)}>
           <label className="field-label">Work email<input type="email" name="email" required maxLength={320} placeholder="colleague@example.com" /></label>
-          <label className="field-label">Organization role<select name="role" defaultValue="employee"><option value="employee">Employee</option><option value="property_manager">Property manager</option><option value="tenant">Tenant</option>{isAdminRole(role) && <option value="administrator">Administrator</option>}</select></label>
+          <label className="field-label">Organization role<select name="role" defaultValue="tenant"><option value="tenant">Customer / Tenant</option><option value="employee">Employee</option><option value="property_manager">Property manager</option>{role === "owner" && <option value="administrator">Administrator</option>}</select></label>
           <p className="form-hint"><ShieldCheck size={15} />{organization.require_second_approval ? "A second authorized administrator must approve this request." : "This organization permits direct invitations."}</p>
           {notice && <p className="success-message" role="status"><Check size={16} />{notice}</p>}
           <button className="primary-button compact" type="submit" disabled={pending}>{pending ? "Submitting…" : organization.require_second_approval ? "Request approval" : "Send invitation"}<ArrowUpRight size={15} /></button>
         </form> : <div className="empty-state">Your current role cannot invite organization members.</div>}
       </section>
       <section className="surface-card team-note">
-        <div className="team-note-icon"><ShieldCheck size={20} /></div><div><h3>Access is invitation-only</h3><p>Staff access is never granted by public sign-up. Invitations expire after seven days and are bound to the invited email address.</p></div>
+        <div className="team-note-icon"><ShieldCheck size={20} /></div><div><h3>Access is invitation-only</h3><p>Only the organization owner can invite members. New invitations default to Customer / Tenant, and only the owner can grant administrator access. Invitations expire after seven days and are bound to the invited email address.</p></div>
       </section>
     </div>
   );
@@ -1515,36 +1593,79 @@ function MfaGate({ onComplete, onSignOut, onCancel, optional = false }: { onComp
   const [secret, setSecret] = useState("");
   const [code, setCode] = useState("");
   const [pending, setPending] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const [setupKeyMissing, setSetupKeyMissing] = useState(false);
   const [message, setMessage] = useState("");
+  const factorSetup = useRef<Promise<{ factorId: string; secret: string; setupKeyMissing: boolean }> | null>(null);
 
   useEffect(() => {
     const client = supabase;
     if (!client) return;
     let active = true;
-    void client.auth.mfa.listFactors().then(async ({ data, error }) => {
-      if (!active) return;
-      if (error) {
-        setMessage("Multi-factor setup is unavailable. Contact your organization administrator.");
-        return;
-      }
-      const verified = data.totp.find((factor) => factor.status === "verified");
-      if (verified) {
-        setFactorId(verified.id);
-      } else {
+    if (!factorSetup.current) {
+      factorSetup.current = (async () => {
+        const { data, error } = await client.auth.mfa.listFactors();
+        if (error) throw error;
+        const verified = data.totp.find((factor) => factor.status === "verified");
+        if (verified) return { factorId: verified.id, secret: "", setupKeyMissing: false };
+        const unverified = data.all.find((factor) => factor.factor_type === "totp" && factor.status === "unverified");
+        if (unverified) return { factorId: unverified.id, secret: "", setupKeyMissing: true };
         const { data: enrollment, error: enrollmentError } = await client.auth.mfa.enroll({
           factorType: "totp",
           friendlyName: "Haven authenticator",
         });
-        if (enrollmentError) {
-          setMessage("Could not start authenticator setup. Try again or contact your administrator.");
-          return;
-        }
-        setFactorId(enrollment.id);
-        setSecret(enrollment.totp.secret);
+        if (enrollmentError) throw enrollmentError;
+        return { factorId: enrollment.id, secret: enrollment.totp.secret, setupKeyMissing: false };
+      })();
+    }
+    void factorSetup.current.then((setup) => {
+      if (!active) return;
+      setFactorId(setup.factorId);
+      setSecret(setup.secret);
+      setSetupKeyMissing(setup.setupKeyMissing);
+      if (setup.setupKeyMissing) {
+        setMessage("An authenticator setup is already pending. Use the key you previously saved, or restart setup if you no longer have it.");
       }
+    }).catch(() => {
+      if (active) setMessage("Multi-factor setup is unavailable. Try again or contact your organization administrator.");
     });
     return () => { active = false; };
   }, []);
+
+  async function restartSetup() {
+    if (!supabase) return;
+    setRestarting(true);
+    setMessage("");
+    const { data, error } = await supabase.auth.mfa.listFactors();
+    if (error) {
+      setMessage("Could not check the pending authenticator setup. Try again.");
+      setRestarting(false);
+      return;
+    }
+    for (const factor of data.all.filter((item) => item.factor_type === "totp" && item.status === "unverified")) {
+      const { error: unenrollError } = await supabase.auth.mfa.unenroll({ factorId: factor.id });
+      if (unenrollError) {
+        setMessage("Could not remove the pending setup. Try again or contact your organization administrator.");
+        setRestarting(false);
+        return;
+      }
+    }
+    const { data: enrollment, error: enrollmentError } = await supabase.auth.mfa.enroll({
+      factorType: "totp",
+      friendlyName: "Haven authenticator",
+    });
+    if (enrollmentError) {
+      setMessage("Could not restart authenticator setup. Try again or contact your organization administrator.");
+      setRestarting(false);
+      return;
+    }
+    factorSetup.current = Promise.resolve({ factorId: enrollment.id, secret: enrollment.totp.secret, setupKeyMissing: false });
+    setFactorId(enrollment.id);
+    setSecret(enrollment.totp.secret);
+    setSetupKeyMissing(false);
+    setCode("");
+    setRestarting(false);
+  }
 
   async function verify(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1573,12 +1694,14 @@ function MfaGate({ onComplete, onSignOut, onCancel, optional = false }: { onComp
         <p className="eyebrow">PRIVILEGED ACCOUNT SECURITY</p>
         <h1>Protect your account</h1>
         <p>{optional ? "Use an authenticator app to add a second step to your sign-in." : "Owner and administrator actions require a second factor. Use an authenticator app to verify your sign-in."}</p>
-        {secret && <div className="secret-panel"><strong>Authenticator setup key</strong><code>{secret}</code><small>Enter this key in your authenticator app. Keep it private; Haven will not store or log it.</small></div>}
+        {secret && <div className="secret-panel"><strong>Authenticator setup key</strong><code>{secret}</code><small>Manually enter this key in your authenticator app; this screen does not provide a QR code. Keep it private; Haven will not store or log it.</small></div>}
+        {setupKeyMissing && <p className="security-help" role="status">The pending key cannot be shown again. Restart setup to create a new key.</p>}
         <form onSubmit={(event) => void verify(event)} className="auth-form">
           <label className="field-label">6-digit authenticator code<input inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} required value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))} /></label>
           {message && <p className="form-error" role="alert">{message}</p>}
           <button className="primary-button wide" disabled={pending || !factorId} type="submit">{pending ? "Verifying…" : secret ? "Verify and enable MFA" : "Verify sign-in"}<ArrowUpRight size={16} /></button>
         </form>
+        {setupKeyMissing && <button className="text-button mfa-signout" disabled={restarting || pending} onClick={() => void restartSetup()} type="button">{restarting ? "Restarting setup…" : "Restart authenticator setup"}</button>}
         {optional ? <button className="text-button mfa-signout" onClick={onCancel} type="button">Not now</button> : <button className="text-button mfa-signout" onClick={() => void onSignOut()} type="button">Sign out</button>}
       </section>
     </main>
@@ -1588,3 +1711,8 @@ function MfaGate({ onComplete, onSignOut, onCancel, optional = false }: { onComp
 function AccessMessage({ message, onSignOut }: { message: string; onSignOut: () => void }) {
   return <main className="mfa-page"><section className="mfa-card"><span className="mfa-shield"><ShieldCheck size={26} /></span><p className="eyebrow">ACCESS CONTROL</p><h1>Workspace access required</h1><p>{message}</p><button className="primary-button wide" type="button" onClick={onSignOut}>Sign out securely <LogOut size={16} /></button></section></main>;
 }
+
+
+
+
+

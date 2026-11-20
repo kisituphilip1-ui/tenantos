@@ -152,13 +152,13 @@ Deno.serve(async (request: Request) => {
   }
 
   const inviterRole = membership.role as string;
-  if (!["owner", "administrator", "property_manager"].includes(inviterRole)) {
+  if (!["owner", "administrator"].includes(inviterRole)) {
     return jsonResponse(403, { error: "Not authorized" }, origin);
   }
   if (["owner", "administrator"].includes(inviterRole) && claims.aal !== "aal2") {
     return jsonResponse(403, { error: "Multi-factor authentication required" }, origin);
   }
-  if (role === "administrator" && !["owner", "administrator"].includes(inviterRole)) {
+  if (role === "administrator" && inviterRole !== "owner") {
     return jsonResponse(403, { error: "Not authorized" }, origin);
   }
 
@@ -196,6 +196,8 @@ Deno.serve(async (request: Request) => {
     ) {
       return jsonResponse(403, { error: "Approved request required" }, origin);
     }
+  } else if (inviterRole !== "owner") {
+    return jsonResponse(403, { error: "Only the owner may invite members" }, origin);
   }
 
   const invitationId = crypto.randomUUID();

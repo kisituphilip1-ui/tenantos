@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import type { FormEvent } from "react";
 import {
   ArrowUpRight,
   Bell,
@@ -12,11 +13,15 @@ import {
   Home,
   KeyRound,
   Menu,
+  Pencil,
+  Plus,
   Search,
   ShieldCheck,
+  Trash2,
   Users,
   Wallet,
   Wrench,
+  X,
 } from "lucide-react";
 
 type DemoRole = "owner" | "administrator" | "property_manager" | "employee" | "tenant";
@@ -33,6 +38,21 @@ type DemoPage =
   | "Audit"
   | "Security";
 type DemoRow = Record<string, string>;
+type DemoRecords = Partial<Record<DemoPage, DemoRow[]>>;
+type DemoDataPage = Exclude<DemoPage, "Overview" | "Security">;
+
+const demoDataPages: DemoDataPage[] = [
+  "Properties",
+  "Tenancies",
+  "Payments",
+  "Maintenance",
+  "Documents",
+  "Notices",
+  "Approvals",
+  "Team",
+  "Audit",
+];
+const demoStorageKey = "haven-demo-records-v1";
 
 const roleLabels: Record<DemoRole, string> = {
   owner: "Owner",
@@ -82,7 +102,7 @@ const columns: Partial<Record<DemoPage, [string, string][]>> = {
   Audit: [["event", "Event"], ["actor", "Actor"], ["record", "Record"], ["time", "Time"]],
 };
 
-const records: Partial<Record<DemoPage, DemoRow[]>> = {
+const records: DemoRecords = {
   Properties: [
     { property: "Bukoto Garden Homes", location: "Bukoto, Kampala", units: "12", occupancy: "10 occupied" },
     { property: "Naalya Heights", location: "Naalya, Wakiso", units: "8", occupancy: "7 occupied" },
@@ -130,14 +150,63 @@ const records: Partial<Record<DemoPage, DemoRow[]>> = {
   ],
 };
 
-const tenantRows: Partial<Record<DemoPage, DemoRow[]>> = {
-  Properties: [records.Properties![0]],
-  Tenancies: [records.Tenancies![0]],
-  Payments: [records.Payments![0]],
-  Maintenance: [records.Maintenance![0]],
-  Documents: [records.Documents![0]],
-  Notices: [records.Notices![1]],
-};
+function withDemoIds(source: DemoRecords): DemoRecords {
+  const result: DemoRecords = {};
+  for (const page of demoDataPages) {
+    const rows = source[page];
+    if (rows) {
+      result[page] = rows.map((row, index) => ({
+        ...row,
+        id: row.id || `${page.toLowerCase()}-${index + 1}`,
+      }));
+    }
+  }
+  return result;
+}
+
+const initialDemoRecords = withDemoIds(records);
+
+function isDemoRow(value: unknown): value is DemoRow {
+  return value !== null
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && Object.values(value).every((item) => typeof item === "string");
+}
+
+function isDemoRecords(value: unknown): value is DemoRecords {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  return Object.entries(value).every(([page, rows]) =>
+    demoDataPages.some((knownPage) => knownPage === page)
+    && Array.isArray(rows)
+    && rows.every(isDemoRow)
+  );
+}
+
+function recordLabel(row: DemoRow, page: DemoPage) {
+  return row.property
+    || row.request
+    || row.document
+    || row.notice
+    || row.reference
+    || row.member
+    || row.tenant
+    || row.event
+    || `${page} sample`;
+}
+
+function createAuditRecord(action: string, page: DemoPage, label: string, role: DemoRole): DemoRow {
+  return {
+    id: crypto.randomUUID(),
+    event: `${action} ${page.toLowerCase()} record`,
+    actor: `Demo ${roleLabels[role]}`,
+    record: label,
+    time: new Intl.DateTimeFormat("en-UG", {
+      dateStyle: "medium",
+      timeStyle: "short",
+      timeZone: "Africa/Kampala",
+    }).format(new Date()),
+  };
+}
 
 const pageCanBeSeen = (page: DemoPage, role: DemoRole) => {
   if (page === "Audit") return role === "owner" || role === "administrator";
@@ -147,8 +216,52 @@ const pageCanBeSeen = (page: DemoPage, role: DemoRole) => {
   return true;
 };
 
-function visibleRows(page: DemoPage, role: DemoRole): DemoRow[] {
-  const rows = role === "tenant" ? tenantRows[page] ?? [] : records[page] ?? [];
+function canAddDemoRecord(page: DemoPage, role: DemoRole) {
+  const isAdmin = role === "owner" || role === "administrator";
+  if (page === "Maintenance" || page === "Payments") return true;
+  if (page === "Properties" || page === "Tenancies" || page === "Notices") return isAdmin || role === "property_manager";
+  if (page === "Documents") return isAdmin || role === "property_manager" || role === "tenant";
+  if (page === "Approvals") return isAdmin || role === "property_manager";
+  if (page === "Team") return isAdmin;
+  return false;
+}
+
+function canEditDemoRecord(page: DemoPage, role: DemoRole) {
+  const isAdmin = role === "owner" || role === "administrator";
+  if (page === "Properties" || page === "Payments" || page === "Notices" || page === "Approvals" || page === "Team") {
+    return isAdmin || role === "property_manager" && page !== "Team";
+  }
+  if (page === "Tenancies") return isAdmin || role === "property_manager";
+  if (page === "Maintenance") return true;
+  if (page === "Documents") return isAdmin || role === "property_manager" || role === "tenant";
+  return false;
+}
+
+function canDeleteDemoRecord(page: DemoPage, role: DemoRole) {
+  return (role === "owner" || role === "administrator")
+    && page !== "Audit"
+    && page !== "Security"
+    && page !== "Overview";
+}
+
+function visibleRows(page: DemoPage, role: DemoRole, source: DemoRecords): DemoRow[] {
+  let rows = source[page] ?? [];
+  if (role === "tenant") {
+    const tenantRecordIndex: Partial<Record<DemoPage, number>> = {
+      Properties: 0,
+      Tenancies: 0,
+      Payments: 0,
+      Maintenance: 0,
+      Documents: 0,
+      Notices: 1,
+    };
+    const index = tenantRecordIndex[page];
+    const seededRow = index === undefined ? undefined : rows[index];
+    rows = [
+      ...(seededRow ? [seededRow] : []),
+      ...rows.filter((row) => row.createdByRole === "tenant"),
+    ];
+  }
   if (role === "employee" && page === "Payments") {
     return rows
       .filter((row) => row.unit === "A-04" || row.reference === "PAY-DEMO-001")
@@ -180,13 +293,97 @@ export function DemoWorkspace({ onExit }: { onExit: () => void }) {
   const [page, setPage] = useState<DemoPage>("Overview");
   const [search, setSearch] = useState("");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [demoRecords, setDemoRecords] = useState<DemoRecords>(initialDemoRecords);
+  const [storageMessage, setStorageMessage] = useState("");
+  const [interactionMessage, setInteractionMessage] = useState("");
+  const [storageReady, setStorageReady] = useState(false);
+
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(demoStorageKey);
+      if (saved) {
+        const parsed: unknown = JSON.parse(saved);
+        if (isDemoRecords(parsed)) {
+          setDemoRecords(withDemoIds(parsed));
+        } else {
+          setStorageMessage("Saved demo data could not be read. The sample records have been restored.");
+        }
+      }
+    } catch {
+      setStorageMessage("Browser storage is unavailable. Demo changes may not persist after you leave.");
+    }
+    setStorageReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (!storageReady) return;
+    try {
+      window.localStorage.setItem(demoStorageKey, JSON.stringify(demoRecords));
+    } catch {
+      setStorageMessage("Demo changes could not be saved in this browser; they remain available for this session.");
+    }
+  }, [demoRecords, storageReady]);
+
   const visibleNavigation = useMemo(() => navigation.filter((item) => pageCanBeSeen(item.name, role)), [role]);
-  const rows = visibleRows(page, role);
-  const filteredRows = rows.filter((row) => Object.values(row).some((value) => value.toLowerCase().includes(search.toLowerCase())));
+  const rows = visibleRows(page, role, demoRecords);
+  const filteredRows = rows.filter((row) => Object.entries(row).some(([key, value]) =>
+    key !== "id"
+    && key !== "createdByRole"
+    && value.toLowerCase().includes(search.toLowerCase())
+  ));
 
   function changeRole(nextRole: DemoRole) {
     setRole(nextRole);
     if (!pageCanBeSeen(page, nextRole)) setPage("Overview");
+  }
+
+  function saveRecord(recordPage: DemoDataPage, draft: DemoRow, editingId?: string) {
+    if (recordPage === "Audit") return;
+    const id = editingId ?? crypto.randomUUID();
+    const label = recordLabel(draft, recordPage);
+    const auditRecord = createAuditRecord(editingId ? "Updated" : "Added", recordPage, label, role);
+    setDemoRecords((current) => {
+      const pageRecords = current[recordPage] ?? [];
+      const existing = editingId ? pageRecords.find((row) => row.id === editingId) : undefined;
+      const savedRecord: DemoRow = {
+        ...(existing ?? {}),
+        ...draft,
+        id,
+        createdByRole: existing?.createdByRole ?? role,
+      };
+      if (!editingId && recordPage === "Payments" && !savedRecord.status) savedRecord.status = "Pending review";
+      if (recordPage === "Maintenance" && !savedRecord.status) savedRecord.status = "Open";
+      if (recordPage === "Approvals" && !savedRecord.status) savedRecord.status = "Pending";
+      if (recordPage === "Documents" && !savedRecord.access) savedRecord.access = "Private (demo)";
+      const nextPageRecords = editingId
+        ? pageRecords.map((row) => row.id === editingId ? savedRecord : row)
+        : [savedRecord, ...pageRecords];
+      return {
+        ...current,
+        [recordPage]: nextPageRecords,
+        Audit: [auditRecord, ...(current.Audit ?? [])].slice(0, 25),
+      };
+    });
+    setInteractionMessage("Demo change saved in this browser only.");
+  }
+
+  function deleteRecord(recordPage: DemoDataPage, row: DemoRow) {
+    if (!canDeleteDemoRecord(recordPage, role) || recordPage === "Audit") return;
+    const label = recordLabel(row, recordPage);
+    if (!window.confirm(`Remove "${label}" from this browser's demo data?`)) return;
+    const auditRecord = createAuditRecord("Deleted", recordPage, label, role);
+    setDemoRecords((current) => ({
+      ...current,
+      [recordPage]: (current[recordPage] ?? []).filter((item) => item.id !== row.id),
+      Audit: [auditRecord, ...(current.Audit ?? [])].slice(0, 25),
+    }));
+    setInteractionMessage("Demo record removed from this browser only.");
+  }
+
+  function resetDemoData() {
+    if (!window.confirm("Restore the original fictional demo records in this browser?")) return;
+    setDemoRecords(initialDemoRecords);
+    setInteractionMessage("Original demo records restored.");
   }
 
   return (
@@ -236,20 +433,23 @@ export function DemoWorkspace({ onExit }: { onExit: () => void }) {
               <kbd>⌘ K</kbd>
             </label>
             <span className="topbar-divider" />
-            <span className="demo-readonly-label">Read-only preview</span>
+            <span className="demo-mode-label">Interactive demo</span>
           </div>
         </header>
 
         <main className="main-content">
           <div className="demo-banner" role="note">
-            <div className="demo-banner-copy"><span className="demo-badge">DEMO</span><span>Fictional sample data only. No sign-in, uploads, payments, or changes are connected.</span></div>
+            <div className="demo-banner-copy"><span className="demo-badge">DEMO</span><span>Fictional sample data only. Changes stay in this browser; no live data, uploads, or payments are connected.</span></div>
             <label className="demo-role-select"><span>Preview role</span>
               <select aria-label="Choose a role to preview" value={role} onChange={(event) => changeRole(event.target.value as DemoRole)}>
                 {Object.entries(roleLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
             </label>
+            <button className="demo-exit-button" onClick={resetDemoData} type="button">Reset demo data</button>
             <button className="demo-exit-button" onClick={onExit} type="button">Exit demo</button>
           </div>
+          {storageMessage && <p className="demo-storage-message" role="status">{storageMessage}</p>}
+          {interactionMessage && <p className="demo-storage-message" role="status">{interactionMessage}</p>}
 
           <div className="page-heading">
             <div><p className="eyebrow">KAMPALA CENTRAL ESTATES · SAMPLE</p><h1>{page}</h1><p className="page-subtitle">{pageSubtitles[page]}</p></div>
@@ -258,10 +458,17 @@ export function DemoWorkspace({ onExit }: { onExit: () => void }) {
             </div>
           </div>
 
-          {page === "Overview" && <DemoOverview role={role} onNavigate={setPage} />}
+          {page === "Overview" && <DemoOverview role={role} onNavigate={setPage} demoRecords={demoRecords} />}
           {page === "Security" && <DemoSecurity />}
           {page !== "Overview" && page !== "Security" && (
-            <DemoDataPage page={page} role={role} rows={filteredRows} search={search} />
+            <DemoDataPage
+              page={page}
+              role={role}
+              rows={filteredRows}
+              search={search}
+              onSave={saveRecord}
+              onDelete={deleteRecord}
+            />
           )}
 
           <footer className="app-footer"><span>Haven for Uganda</span><span>Demo only · no real account or data</span><span>All sample amounts in UGX</span></footer>
@@ -276,7 +483,11 @@ function DemoNavItem({ item, active, onClick }: { item: (typeof navigation)[numb
   return <button className={`nav-item ${active ? "nav-item-active" : ""}`} onClick={onClick} type="button" aria-current={active ? "page" : undefined}><Icon size={18} strokeWidth={active ? 2 : 1.8} /><span>{item.name}</span></button>;
 }
 
-function DemoOverview({ role, onNavigate }: { role: DemoRole; onNavigate: (page: DemoPage) => void }) {
+function DemoOverview({ role, onNavigate, demoRecords }: {
+  role: DemoRole;
+  onNavigate: (page: DemoPage) => void;
+  demoRecords: DemoRecords;
+}) {
   const metrics = role === "tenant"
     ? [
         { label: "My unit", value: "A-04", detail: "Bukoto Garden Homes", icon: KeyRound },
@@ -304,11 +515,11 @@ function DemoOverview({ role, onNavigate }: { role: DemoRole; onNavigate: (page:
             { label: "Rent to review", value: "4", detail: "Sample pending items", icon: Wallet },
             { label: "Open maintenance", value: "3", detail: "1 high priority", icon: Wrench },
           ];
-  const paymentRows = role === "tenant" ? [records.Payments![0]] : role === "employee" ? visibleRows("Payments", role) : records.Payments!;
+  const paymentRows = visibleRows("Payments", role, demoRecords);
   const paymentColumns: [string, string][] = role === "employee"
     ? [["reference", "Reference"], ["unit", "Unit"], ["method", "Method"], ["status", "Status"]]
     : [["reference", "Reference"], ["unit", "Unit"], ["amount", "Amount"], ["status", "Status"]];
-  const requestRows = role === "tenant" ? [records.Maintenance![0]] : role === "employee" || role === "property_manager" ? records.Maintenance!.slice(0, 2) : records.Maintenance!;
+  const requestRows = visibleRows("Maintenance", role, demoRecords);
   return (
     <>
       <section className="welcome-strip demo-welcome">
@@ -329,7 +540,7 @@ function DemoOverview({ role, onNavigate }: { role: DemoRole; onNavigate: (page:
         <DemoTableCard title={role === "tenant" ? "My rent activity" : "Recent rent activity"} eyebrow="PAYMENTS · SAMPLE" rows={paymentRows} columns={paymentColumns} onViewAll={() => onNavigate("Payments")} />
         <DemoTableCard title={role === "tenant" ? "My maintenance" : "Maintenance queue"} eyebrow="SERVICE · SAMPLE" rows={requestRows} columns={[["request", "Request"], ["status", "Status"]]} onViewAll={() => onNavigate("Maintenance")} />
       </div>
-      <div className="demo-note"><ShieldCheck size={16} /><span>Every figure and record in this preview is fictional. Live actions require a configured Supabase project and authenticated access.</span></div>
+      <div className="demo-note"><ShieldCheck size={16} /><span>Every figure and record is fictional. You can try changes here; they are saved only in this browser and never reach a live account.</span></div>
     </>
   );
 }
@@ -338,21 +549,112 @@ function DemoTableCard({ title, eyebrow, rows, columns, onViewAll }: { title: st
   return <section className="surface-card payments-card">
     <div className="card-heading"><div><p className="eyebrow">{eyebrow}</p><h2>{title}</h2></div><button className="subtle-link" onClick={onViewAll} type="button">View all <ArrowUpRight size={14} /></button></div>
     <div className="table-scroll"><table className="data-table"><thead><tr>{columns.map(([key, label]) => <th key={key}>{label}</th>)}</tr></thead><tbody>
-      {rows.map((row) => <tr key={row.reference ?? row.request}>{columns.map(([key]) => <td key={key}>{row[key] ?? "—"}</td>)}</tr>)}
+      {rows.map((row, index) => <tr key={row.id ?? `${row.reference ?? row.request}-${index}`}>{columns.map(([key]) => <td key={key}>{row[key] ?? "—"}</td>)}</tr>)}
     </tbody></table></div>
   </section>;
 }
 
-function DemoDataPage({ page, role, rows, search }: { page: DemoPage; role: DemoRole; rows: DemoRow[]; search: string }) {
+function DemoDataPage({ page, role, rows, search, onSave, onDelete }: {
+  page: DemoDataPage;
+  role: DemoRole;
+  rows: DemoRow[];
+  search: string;
+  onSave: (page: DemoDataPage, row: DemoRow, editingId?: string) => void;
+  onDelete: (page: DemoDataPage, row: DemoRow) => void;
+}) {
   const pageColumns = columns[page] ?? [];
   const visibleColumns = role === "employee" && page === "Payments" ? pageColumns.filter(([key]) => key !== "amount") : pageColumns;
+  const canAdd = canAddDemoRecord(page, role);
+  const canEdit = canEditDemoRecord(page, role);
+  const canDelete = canDeleteDemoRecord(page, role);
+  const [formOpen, setFormOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string>();
+  const [draft, setDraft] = useState<DemoRow>({});
+  const [formError, setFormError] = useState("");
+
+  function startAdd() {
+    const blankDraft: DemoRow = {};
+    for (const [key] of visibleColumns) blankDraft[key] = "";
+    setDraft(blankDraft);
+    setEditingId(undefined);
+    setFormError("");
+    setFormOpen(true);
+  }
+
+  function startEdit(row: DemoRow) {
+    const editDraft: DemoRow = {};
+    for (const [key] of visibleColumns) editDraft[key] = row[key] ?? "";
+    setDraft(editDraft);
+    setEditingId(row.id);
+    setFormError("");
+    setFormOpen(true);
+  }
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const savedDraft: DemoRow = {};
+    for (const [key] of visibleColumns) savedDraft[key] = (draft[key] ?? "").trim();
+    const requiredField = visibleColumns[0]?.[0];
+    if (!requiredField || !savedDraft[requiredField]) {
+      setFormError(`Enter a value for ${visibleColumns[0]?.[1] ?? "the first field"}.`);
+      return;
+    }
+    onSave(page, savedDraft, editingId);
+    setFormOpen(false);
+    setFormError("");
+  }
+
+  const footnote = page === "Payments"
+    ? "Payment entries and statuses are simulated; no money moves."
+    : page === "Documents"
+      ? "Document entries are sample metadata only; no files are uploaded."
+      : page === "Team"
+        ? "Team changes stay in this browser; no invitations are sent."
+        : page === "Audit"
+          ? "This log contains only actions performed in the local demo."
+          : "Changes are stored only in this browser. Reset demo data any time.";
+
   return <section className="surface-card demo-records-card">
-    <div className="card-heading"><div><p className="eyebrow">SAMPLE RECORDS</p><h2>{page} · read-only</h2></div><span className="demo-record-count">{rows.length} {rows.length === 1 ? "record" : "records"}</span></div>
-    <div className="table-scroll"><table className="data-table"><thead><tr>{visibleColumns.map(([key, label]) => <th key={key}>{label}</th>)}</tr></thead><tbody>
-      {rows.map((row, index) => <tr key={`${page}-${index}`}>{visibleColumns.map(([key]) => <td key={key}>{row[key] ?? "—"}</td>)}</tr>)}
-      {!rows.length && <tr><td className="empty-cell" colSpan={Math.max(1, visibleColumns.length)}>{search ? "No sample records match this search." : "No sample records are available for this role."}</td></tr>}
+    <div className="card-heading">
+      <div><p className="eyebrow">SAMPLE RECORDS</p><h2>{page} · interactive demo</h2></div>
+      <div className="demo-record-toolbar">
+        <span className="demo-record-count">{rows.length} {rows.length === 1 ? "record" : "records"}</span>
+        {canAdd && <button className="primary-button compact" onClick={startAdd} type="button"><Plus size={15} />Add sample</button>}
+      </div>
+    </div>
+    {formOpen && <form className="demo-record-form" onSubmit={submit}>
+      <div className="demo-record-form-grid">
+        {visibleColumns.map(([key, label], index) => (
+          <label className="field-label" key={key}>{label}
+            <input
+              maxLength={180}
+              required={index === 0}
+              value={draft[key] ?? ""}
+              onChange={(event) => setDraft((current) => ({ ...current, [key]: event.target.value }))}
+            />
+          </label>
+        ))}
+      </div>
+      {formError && <p className="form-error" role="alert">{formError}</p>}
+      <div className="demo-form-actions">
+        <button className="primary-button compact" type="submit">{editingId ? "Save changes" : "Add demo record"}</button>
+        <button className="secondary-button" onClick={() => setFormOpen(false)} type="button"><X size={14} />Cancel</button>
+      </div>
+    </form>}
+    <div className="table-scroll"><table className="data-table"><thead><tr>
+      {visibleColumns.map(([key, label]) => <th key={key}>{label}</th>)}
+      {(canEdit || canDelete) && <th>Actions</th>}
+    </tr></thead><tbody>
+      {rows.map((row, index) => <tr key={row.id ?? `${page}-${index}`}>
+        {visibleColumns.map(([key]) => <td key={key}>{row[key] || "—"}</td>)}
+        {(canEdit || canDelete) && <td className="demo-row-actions">
+          {canEdit && <button className="demo-action-button" onClick={() => startEdit(row)} type="button" aria-label={`Edit ${recordLabel(row, page)}`}><Pencil size={13} />Edit</button>}
+          {canDelete && <button className="demo-action-button is-danger" onClick={() => onDelete(page, row)} type="button" aria-label={`Delete ${recordLabel(row, page)}`}><Trash2 size={13} />Delete</button>}
+        </td>}
+      </tr>)}
+      {!rows.length && <tr><td className="empty-cell" colSpan={Math.max(1, visibleColumns.length + Number(canEdit || canDelete))}>{search ? "No sample records match this search." : "No sample records are available for this role."}</td></tr>}
     </tbody></table></div>
-    <div className="demo-table-footnote"><ShieldCheck size={15} />Example records only. No actions are connected in demo mode.</div>
+    <div className="demo-table-footnote"><ShieldCheck size={15} />{footnote}</div>
   </section>;
 }
 
