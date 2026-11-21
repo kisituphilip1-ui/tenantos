@@ -423,7 +423,7 @@ function AuthScreen({ message, onMessage, onStartDemo, onPasswordChanged, isPass
             {mode === "signin" && (
               <>
                 <button type="button" className="text-button" onClick={() => { setMode("forgot"); onMessage(""); setNotice(""); }}>Forgot password?</button>
-                <button type="button" className="text-button" onClick={onStartDemo}>Explore interactive demo</button>
+                
               </>
             )}
             {mode !== "signin" && (
@@ -1713,3 +1713,4 @@ function MfaGate({ onComplete, onSignOut, onCancel, optional = false }: { onComp
 function AccessMessage({ message, onSignOut }: { message: string; onSignOut: () => void }) {
   return <main className="mfa-page"><section className="mfa-card"><span className="mfa-shield"><ShieldCheck size={26} /></span><p className="eyebrow">ACCESS CONTROL</p><h1>Workspace access required</h1><p>{message}</p><button className="primary-button wide" type="button" onClick={onSignOut}>Sign out securely <LogOut size={16} /></button></section></main>;
 }
+
